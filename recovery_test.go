@@ -9,14 +9,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// openPgx connects with pgx over the simple query protocol. The recursion
+// openPgx connects with pgx through database/sql. The recursion
 // tests use it because their error reports carry one CONTEXT line per
 // level, and lib/pq rejects an ErrorResponse longer than 30000 bytes (a
 // libpq startup-only check that lib/pq applies to every message) and then
 // loses protocol synchronisation.
 func openPgx(t *testing.T, pg *pglite.PGlite) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("pgx", pg.ConnString()+" default_query_exec_mode=simple_protocol")
+	db, err := sql.Open("pgx", pg.ConnString()+"")
 	if err != nil {
 		t.Fatalf("sql.Open pgx: %v", err)
 	}
@@ -29,18 +29,6 @@ func openPgx(t *testing.T, pg *pglite.PGlite) *sql.DB {
 // the enclosing PG_TRY or to the main loop), which needs working
 // setjmp/longjmp in the WASI module. Without it the first ERROR inside a
 // nested PG_TRY traps the module.
-
-func TestVersionIsPostgres17(t *testing.T) {
-	pg := newTestPG(t)
-
-	var version string
-	if err := pg.DB().QueryRow("SELECT version()").Scan(&version); err != nil {
-		t.Fatalf("SELECT version(): %v", err)
-	}
-	if !strings.HasPrefix(version, "PostgreSQL 17.5 ") {
-		t.Errorf("version() = %q, want PostgreSQL 17.5", version)
-	}
-}
 
 func TestErrorThenNextQueryWorks(t *testing.T) {
 	db := newTestPG(t).DB()

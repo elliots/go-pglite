@@ -1,41 +1,62 @@
 package pglite
 
-import "os"
+import "log/slog"
 
-// Config holds configuration for a PGlite instance.
+// User and Database are the only role and database the backend serves: the
+// module runs initdb as this user and starts the single-user backend on
+// this database.
+const (
+	User     = "postgres"
+	Database = "postgres"
+)
+
+// Config configures an instance. The zero value starts a fresh cluster in a
+// temporary directory that Close removes.
 type Config struct {
-	// DataDir is the host directory used for PostgreSQL data files.
-	// Defaults to a temporary directory.
+	// DataDir is the instance directory, holding the cluster under
+	// pglite/base. It is created if missing; a directory without a cluster
+	// is initialised. Empty means a temporary directory removed by Close.
 	DataDir string
 
-	// Database is the PostgreSQL database name. Defaults to "postgres".
-	Database string
+	// Template is a directory made by CreateTemplate whose cluster is
+	// copied into DataDir before the start. DataDir must not hold a cluster
+	// yet.
+	Template string
 
-	// User is the PostgreSQL user name. Defaults to "postgres".
-	User string
+	// CacheDir holds what every instance shares: the extracted installation
+	// and wasmtime's compiled code. Empty means DefaultCacheDir.
+	CacheDir string
 
-	// StdoutFile is the path to a file for PostgreSQL stdout output.
-	// If empty, stdout is discarded (/dev/null).
+	// Settings are session settings every connection starts with, applied
+	// before the client's own startup parameters. A setting PostgreSQL
+	// rejects fails the first connection. For example,
+	// synchronous_commit=off makes a commit return before its WAL reaches
+	// disk, which on macOS (where every fsync is a full flush) takes
+	// several milliseconds; a crash can then lose the last commits, but
+	// never corrupt the cluster.
+	Settings map[string]string
+
+	// StdoutFile and StderrFile receive the module's standard output and
+	// PostgreSQL's log. Empty discards them.
 	StdoutFile string
-
-	// StderrFile is the path to a file for PostgreSQL stderr output.
-	// If empty, stderr is discarded (/dev/null).
 	StderrFile string
+
+	// Logger receives the bridge's own messages, such as a crash of the
+	// module. nil means slog.Default.
+	Logger *slog.Logger
 }
 
-func (c *Config) withDefaults() Config {
+func (c *Config) withDefaults() (Config, error) {
 	out := *c
-	if out.Database == "" {
-		out.Database = "postgres"
+	if out.CacheDir == "" {
+		dir, err := DefaultCacheDir()
+		if err != nil {
+			return out, err
+		}
+		out.CacheDir = dir
 	}
-	if out.User == "" {
-		out.User = "postgres"
+	if out.Logger == nil {
+		out.Logger = slog.Default()
 	}
-	if out.StdoutFile == "" {
-		out.StdoutFile = os.DevNull
-	}
-	if out.StderrFile == "" {
-		out.StderrFile = os.DevNull
-	}
-	return out
+	return out, nil
 }
