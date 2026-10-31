@@ -1,0 +1,43 @@
+pglite-wasi-17.5.tar.gz: PostgreSQL 17.5 (PGlite WASI port) built by build/build.sh
+
+sha256 e124dd8ab56c4bb4b5ad1910b8bd585d4431ddeb3188d8fadc625889a56f5792
+
+Source
+  https://github.com/electric-sql/postgres-pglite.git
+  branch REL_17_5_WASM-pglite, commit 2194acf356e9b7bf7cff29c4ed4bd6b82b93895d
+
+Patches (build/patches, applied with git apply)
+  0001-wasi-setjmp-longjmp.patch  sha256 82f632e32dac0a65d84df0afed09788735637994cdd5c7de3f162f2a4faf8e8b
+
+Compat shims (build/compat, compiled into the module)
+  compat/include/grp.h  sha256 cbd248e70343146154c20edb01e3457eca387f6b93e5aec4b573d2edcc7e42c6
+  compat/include/net/if.h  sha256 6da5cd302711d7de980ae7e635ccca8884842128361e5a267a59bef88291e7e9
+  compat/include/netdb.h  sha256 ce27959265f7454d4b880d1f2313312c8ed9a921fe8f86fa7085c6bf0124f607
+  compat/include/pwd.h  sha256 f5e5c58a14f900895071f36b1b037106156fe98837f3e213876db866da92fe21
+  compat/include/sys/ipc.h  sha256 7eceecad6157f5973a20398ec8f328e8e9d0962dda3f5d334c146b7706090330
+  compat/include/sys/sem.h  sha256 8ceff333c10910b4c70c8c0d4a56950ac762c574547e0d1acda58439dc340118
+  compat/include/sys/shm.h  sha256 4fe9c37add0b83900013bc8752324968ab5e08e32340767e1e3e74de0bec20ba
+  compat/include/sys/un.h  sha256 a3be9de3312dd141b672368c5f16c8f4c1b65dfcc3c25e87cf09d505605af478
+  compat/include/sys/wait.h  sha256 c22b7890371e091c3ed0aad9dfd67622ddd552d68cb6b2ccb65d290785149338
+  compat/include/wasi_compat.h  sha256 4d0d235f35cc249a5f81222a9728046a03123978c81a11a40bc068607c805e1e
+  compat/wasi_compat.c  sha256 e23775014bd42b40a8b2884b170c97dccc43114b072ed37f91db5f4500cc4dc2
+
+Toolchain (build/Dockerfile)
+  image go-pglite-builder:wasi-sdk-34 id sha256:a80bb50fe0bb40a33a0f44a781228b03837c06c6b3b067d957b350ddbd56b72f
+  base debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+  wasi-sdk-34.0 arm64-linux sha256 f7e243dff54d60bcc576e94d6166b69f410f2500ae4a9ceef34315be10e77971
+  wasi-sdk-34.0 x86_64-linux sha256 b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4
+  wasi-sdk: 34.0
+  clang version 23.1.0-wasi-sdk (https://github.com/llvm/llvm-project 895aa2c896ada719451be2e3673c83da8ddf1141)
+  CFLAGS: -O2 -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN -DPYDK=1 -DSDK_PORT=1 -DPG_PREFIX=/tmp/pglite -DCMA_MB=12 -I/tmp/pglite/include -D_GNU_SOURCE -isystem /compat/include -include /compat/include/wasi_compat.h -Wno-declaration-after-statement -Wno-macro-redefined -Wno-unused-function -Wno-missing-prototypes -Wno-incompatible-pointer-types -Wno-unused-but-set-variable -Wno-unknown-pragmas -Wno-unused-command-line-argument -Wno-unused-variable
+  LDFLAGS: /build/wasi_compat.o -lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid -lwasi-emulated-mman -lsetjmp
+  link: --global-base=12582912 -z stack-size=8388608
+
+Build command
+  build/build.sh  (runs build/pglite-build.sh in the image)
+
+Archive layout (tmp/ prefix is stripped on extraction, see setup.go)
+  tmp/pglite/bin/pglite.wasi      the module; initdb and postgres are symlinks to it
+  tmp/pglite/share/postgresql     share files including timezone data
+  tmp/pglite/lib/postgresql       empty .so placeholders; plpgsql and dict_snowball are linked in
+  tmp/pglite/password
