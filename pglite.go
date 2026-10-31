@@ -15,6 +15,7 @@ package pglite
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -23,22 +24,29 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v42"
+	"github.com/bytecodealliance/wasmtime-go/v50"
 	_ "github.com/lib/pq"
 )
 
+// maxWasmStack is the native stack wasmtime lets WebAssembly frames use
+// (default 512kB). PostgreSQL limits recursion by its shadow stack depth
+// (max_stack_depth, see check_stack_depth); the native frames of the same
+// recursion must fit here, or wasmtime traps before PostgreSQL reports the
+// error. wasmtime caps it at its async stack size, 2MB.
+const maxWasmStack = 2 << 20
+
 // PGlite is an embedded PostgreSQL instance running in a WASI sandbox.
 type PGlite struct {
-	wasmMu  sync.Mutex // protects WASM function calls
-	initMu  sync.Mutex // protects lazy initialization of db
-	cfg     Config
-	ctx     context.Context
-	cancel  context.CancelFunc
-	engine  *wasmtime.Engine
-	store   *wasmtime.Store
+	wasmMu   sync.Mutex // protects WASM function calls
+	initMu   sync.Mutex // protects lazy initialization of db
+	cfg      Config
+	ctx      context.Context
+	cancel   context.CancelFunc
+	engine   *wasmtime.Engine
+	store    *wasmtime.Store
 	instance *wasmtime.Instance
-	dataDir string
-	tempDir bool
+	dataDir  string
+	tempDir  bool
 
 	// Socket bridge.
 	socketDir  string
@@ -48,6 +56,11 @@ type PGlite struct {
 
 	// Internal sql.DB (lazily initialized).
 	db *sql.DB
+
+	// fatal is the first trap of the module, after which the backend's
+	// state is unknown and no further connections are served.
+	fatalMu sync.Mutex
+	fatal   error
 
 	// Cached exported functions.
 	fnInteractiveOne   *wasmtime.Func
@@ -105,8 +118,13 @@ func NewContext(ctx context.Context, cfg Config) (*PGlite, error) {
 		return nil, fmt.Errorf("setup environment: %w", err)
 	}
 
-	// Create wasmtime engine and store.
-	pg.engine = wasmtime.NewEngine()
+	// Create wasmtime engine and store. The module implements
+	// setjmp/longjmp with WebAssembly exception handling (exnref encoding),
+	// which wasmtime only runs when the proposal is enabled.
+	engineCfg := wasmtime.NewConfig()
+	engineCfg.SetWasmExceptions(true)
+	engineCfg.SetMaxWasmStack(maxWasmStack)
+	pg.engine = wasmtime.NewEngineWithConfig(engineCfg)
 	pg.store = wasmtime.NewStore(pg.engine)
 
 	// Configure WASI — mirrors pglite-oxide's standard_wasi_builder.
@@ -125,21 +143,18 @@ func NewContext(ctx context.Context, cfg Config) (*PGlite, error) {
 		return nil, fmt.Errorf("creating pgdata dir: %w", err)
 	}
 
-	allDirPerms := wasmtime.DIR_READ | wasmtime.DIR_WRITE
-	allFilePerms := wasmtime.FILE_READ | wasmtime.FILE_WRITE
-
-	// Three pre-opened directories matching pglite-oxide.
-	if err := wasiCfg.PreopenDir(pg.dataDir, "/tmp", allDirPerms, allFilePerms); err != nil {
+	// Three pre-opened directories matching pglite-oxide, all writable.
+	if err := wasiCfg.PreopenDir(pg.dataDir, "/tmp", true); err != nil {
 		pg.cleanup()
 		cancel()
 		return nil, fmt.Errorf("preopen /tmp: %w", err)
 	}
-	if err := wasiCfg.PreopenDir(pgdataDir, "/tmp/pglite/base", allDirPerms, allFilePerms); err != nil {
+	if err := wasiCfg.PreopenDir(pgdataDir, "/tmp/pglite/base", true); err != nil {
 		pg.cleanup()
 		cancel()
 		return nil, fmt.Errorf("preopen /tmp/pglite/base: %w", err)
 	}
-	if err := wasiCfg.PreopenDir(devDir, "/dev", allDirPerms, allFilePerms); err != nil {
+	if err := wasiCfg.PreopenDir(devDir, "/dev", true); err != nil {
 		pg.cleanup()
 		cancel()
 		return nil, fmt.Errorf("preopen /dev: %w", err)
@@ -304,6 +319,32 @@ func (pg *PGlite) Close() error {
 	return nil
 }
 
+// Err returns the trap that stopped the module, or nil while it is running.
+// PostgreSQL recovers from its own errors inside the module; a trap means
+// the module crashed, so after it no connection is served.
+func (pg *PGlite) Err() error {
+	pg.fatalMu.Lock()
+	defer pg.fatalMu.Unlock()
+	return pg.fatal
+}
+
+func (pg *PGlite) fail(err error) {
+	pg.fatalMu.Lock()
+	defer pg.fatalMu.Unlock()
+	if pg.fatal == nil {
+		pg.fatal = err
+		fmt.Fprintf(os.Stderr, "pglite: module crashed, refusing further connections: %v\n", err)
+	}
+}
+
+// ConnString returns a libpq-style connection string for the embedded
+// server, for drivers other than the lib/pq one DB uses. The server is a
+// single-user backend: use one connection at a time and the simple query
+// protocol.
+func (pg *PGlite) ConnString() string {
+	return pg.connString()
+}
+
 func (pg *PGlite) connString() string {
 	return fmt.Sprintf("host=%s port=5432 dbname=%s user=%s sslmode=disable",
 		pg.socketDir, pg.cfg.Database, pg.cfg.User)
@@ -365,9 +406,22 @@ func (pg *PGlite) startBridge() error {
 func (pg *PGlite) handleConn(conn net.Conn, ioBase string) {
 	defer conn.Close()
 
+	// After a trap the backend's state is unknown: serve nothing.
+	if pg.Err() != nil {
+		return
+	}
+
 	inFile := ioBase + ".in"
 	lockIn := ioBase + ".lock.in"
 	outFile := ioBase + ".out"
+
+	// interactive_one expects whole protocol messages (one or several), so
+	// bytes are held back until a message is complete. A socket read returns
+	// an arbitrary prefix of what the client wrote; a query longer than one
+	// read used to reach PostgreSQL as a fragment and abort the backend.
+	var pending []byte
+	startup := true
+	buf := make([]byte, 65536)
 
 	for {
 		select {
@@ -390,12 +444,23 @@ func (pg *PGlite) handleConn(conn net.Conn, ioBase string) {
 		pg.wasmMu.Unlock()
 
 		conn.SetReadDeadline(time.Now().Add(16 * time.Millisecond))
-		buf := make([]byte, 65536)
 		n, readErr := conn.Read(buf)
 
 		if n > 0 {
+			pending = append(pending, buf[:n]...)
+			complete, rest, stillStartup, err := splitMessages(pending, startup)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "pglite: closing connection: %v\n", err)
+				return
+			}
+			pending = rest
+			startup = stillStartup
+			if len(complete) == 0 {
+				continue
+			}
+
 			// Write to lock file then rename (atomic delivery).
-			if err := os.WriteFile(lockIn, buf[:n], 0o644); err != nil {
+			if err := os.WriteFile(lockIn, complete, 0o644); err != nil {
 				return
 			}
 			if err := os.Rename(lockIn, inFile); err != nil {
@@ -413,8 +478,8 @@ func (pg *PGlite) handleConn(conn net.Conn, ioBase string) {
 			if !pg.sendReplies(conn, replies) {
 				return
 			}
-			// On trap, close connection — sql.DB will reconnect.
 			if trapErr != nil {
+				pg.fail(trapErr)
 				return
 			}
 		}
@@ -426,6 +491,54 @@ func (pg *PGlite) handleConn(conn net.Conn, ioBase string) {
 			return
 		}
 	}
+}
+
+// splitMessages splits client bytes into the longest prefix made of complete
+// protocol messages and the remainder. Before the session is established
+// (startup true) a message is an int32 length followed by its body; SSL and
+// GSS requests (8 bytes with a magic code) are answered and followed by
+// another such message, so startup stays true after them. Afterwards a
+// message is a type byte, an int32 length (including itself) and the body.
+// A length that cannot be valid is a protocol error.
+func splitMessages(data []byte, startup bool) (complete, rest []byte, stillStartup bool, err error) {
+	const maxMessage = 1 << 30 // PostgreSQL's own limit
+	end := 0
+	for {
+		var size, body int
+		if startup {
+			if len(data)-end < 4 {
+				break
+			}
+			body = int(binary.BigEndian.Uint32(data[end:]))
+			size = body
+			if body < 8 || body > maxMessage {
+				return nil, nil, startup, fmt.Errorf("invalid startup message length %d", body)
+			}
+		} else {
+			if len(data)-end < 5 {
+				break
+			}
+			body = int(binary.BigEndian.Uint32(data[end+1:]))
+			size = 1 + body
+			if body < 4 || body > maxMessage {
+				return nil, nil, startup, fmt.Errorf("invalid message length %d for type %q", body, data[end])
+			}
+		}
+		if len(data)-end < size {
+			break
+		}
+		if startup {
+			code := binary.BigEndian.Uint32(data[end+4:])
+			const sslRequest, gssEncRequest = 80877103, 80877104
+			startup = size == 8 && (code == sslRequest || code == gssEncRequest)
+			// Startup messages are delivered one at a time: the reply decides
+			// how the following bytes are framed.
+			end += size
+			break
+		}
+		end += size
+	}
+	return data[:end], data[end:], startup, nil
 }
 
 // forwardWire mirrors pglite-oxide's forward_wire: enables wire mode, then loops
@@ -445,37 +558,13 @@ func (pg *PGlite) forwardWire(outFile string) ([][]byte, error) {
 
 		_, err := pg.fnInteractiveOne.Call(pg.store)
 		if err != nil {
+			// PostgreSQL recovers from its own errors inside interactive_one
+			// (ereport longjmps to the handler in pgl_sjlj.c), so a trap here
+			// is a genuine crash of the module. Hand back what it wrote and
+			// report it; the caller closes the connection.
 			pg.collectReply(outFile, &replies)
-
-			// WASM traps bypass PG_CATCH, so MarkPortalFailed never runs
-			// for active portals. AtAbort_Portals only marks ACTIVE→FAILED
-			// when shmem_exit_inprogress is true. Set it in WASM memory
-			// before calling clear_error so portals get cleaned up.
-			if pg.memory != nil {
-				const shmemExitAddr = 4895117 // GOT.data.internal.shmem_exit_inprogress
-				pg.memory.UnsafeData(pg.store)[shmemExitAddr] = 1
-			}
-			if pg.fnClearError != nil {
-				pg.fnClearError.Call(pg.store) //nolint:errcheck
-			}
-			// Restore shmem_exit_inprogress to false.
-			if pg.memory != nil {
-				const shmemExitAddr = 4895117
-				pg.memory.UnsafeData(pg.store)[shmemExitAddr] = 0
-			}
-			inFile := strings.TrimSuffix(outFile, ".out") + ".in"
-			os.Remove(inFile)
-			if pg.fnInteractiveWrite != nil {
-				pg.fnInteractiveWrite.Call(pg.store, int32(-1)) //nolint:errcheck
-			}
-			if pg.fnUseWire != nil {
-				pg.fnUseWire.Call(pg.store, int32(1)) //nolint:errcheck
-			}
-			pg.fnInteractiveOne.Call(pg.store) //nolint:errcheck
-			// Drain any remaining output.
-			pg.collectReply(outFile, &replies)
-
-			return replies, err
+			os.Remove(strings.TrimSuffix(outFile, ".out") + ".in")
+			return replies, fmt.Errorf("interactive_one trapped: %w", err)
 		}
 
 		producedAfter := pg.collectReply(outFile, &replies)

@@ -1,8 +1,8 @@
 # go-pglite
 
-Very hacky embedded PostgreSQL 17.x for Go, powered by [PGlite](https://pglite.dev/) compiled to WASI.
-
-Based on [pglite-oxide](https://github.com/f0rr0/pglite-oxide)
+Embedded PostgreSQL 17.5 for Go: [PGlite](https://pglite.dev/)'s WASI port
+of PostgreSQL, run with [wasmtime-go](https://github.com/bytecodealliance/wasmtime-go),
+with a Unix-socket bridge so any Go SQL driver can connect.
 
 ## Usage
 
@@ -49,7 +49,34 @@ pglite.Config{
 
 ## How it works
 
-The PGlite WASI binary (PostgreSQL 17 compiled to WebAssembly) is embedded in the Go binary via `//go:embed`. At runtime, it is extracted and executed using [wasmtime-go](https://github.com/bytecodealliance/wasmtime-go). A Unix socket bridge translates between standard PostgreSQL wire protocol and PGlite's file-based I/O, so any Go SQL driver (this package uses [lib/pq](https://github.com/lib/pq)) can connect to it.
+`pglite-wasi-17.5.tar.gz` (PostgreSQL 17.5 compiled to WASI; its provenance
+is in `pglite-wasi-17.5.tar.gz.txt`) is embedded with `//go:embed`. At
+runtime it is extracted and executed with wasmtime, with the WebAssembly
+exception-handling proposal enabled: the module's setjmp/longjmp, and with
+it PostgreSQL's own error recovery, is built on it. A Unix socket bridge
+translates between the PostgreSQL wire protocol and PGlite's file-based I/O,
+so any Go SQL driver (this package uses [lib/pq](https://github.com/lib/pq))
+can connect.
+
+One single-user backend serves every connection, so session state (`SET`,
+temporary tables) is shared between them.
+
+The module sets `max_stack_depth` to 256kB (see `build/patches/`): recursion
+also uses the native stack of wasmtime, limited to 2MB, and at this setting
+PostgreSQL's own "stack depth limit exceeded" error fires before wasmtime
+traps. Raising it is unsafe. `Err()` reports a trap, after which the
+instance serves no further connections.
+
+## Building the WASI binary
+
+```
+build/build.sh
+```
+
+needs Docker and git. It fetches PGlite's PostgreSQL tree at a pinned
+commit, applies `build/patches/`, compiles it with a pinned wasi-sdk inside
+the image from `build/Dockerfile`, and writes the archive and its provenance
+file. The archive is reproducible byte for byte.
 
 ## Requirements
 
@@ -59,7 +86,6 @@ The PGlite WASI binary (PostgreSQL 17 compiled to WebAssembly) is embedded in th
 ## Running tests
 
 ```
-cd go-pglite
 go test -v -timeout 300s
 ```
 
