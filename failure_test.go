@@ -35,12 +35,11 @@ func TestFailedBackendRefusesConnectionsAndReportsWhy(t *testing.T) {
 	// The open session's next statement fails with the reason, and so does
 	// every new connection.
 	_, err = conn.Exec(ctx, "SELECT 1")
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != codeInternalError || !strings.Contains(pgErr.Message, "injected") {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != codeInternalError || !strings.Contains(pgErr.Message, "injected") {
 		t.Errorf("statement after failure: %v", err)
 	}
 	_, err = pgx.Connect(ctx, pg.ConnString())
-	if !errors.As(err, &pgErr) || pgErr.Code != codeInternalError || !strings.Contains(pgErr.Message, "injected") {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != codeInternalError || !strings.Contains(pgErr.Message, "injected") {
 		t.Errorf("connection after failure: %v", err)
 	}
 	// Close does not touch the failed backend beyond releasing it.

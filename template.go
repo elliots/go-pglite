@@ -7,14 +7,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // CreateTemplate makes a template for Config.Template at dir: it starts a
 // fresh instance (cfg.DataDir and cfg.Template must be empty), runs setup on
-// it, for example to apply migrations, and shuts it down. The instance is
-// built in a temporary sibling directory that is renamed to dir only on
-// success, so dir is either absent or a complete template; if dir already
-// exists the rename fails and nothing is changed.
+// it (nil for none), for example to apply migrations, and shuts it down. The
+// instance is built in a temporary sibling directory that is renamed to dir
+// only on success, so dir is either absent or a complete template; if dir
+// already exists the rename fails and nothing is changed.
 func CreateTemplate(ctx context.Context, dir string, cfg Config, setup func(ctx context.Context, pg *PGlite) error) error {
 	if cfg.DataDir != "" || cfg.Template != "" {
 		return errors.New("pglite: CreateTemplate chooses the data directory; leave Config.DataDir and Config.Template empty")
@@ -33,8 +34,10 @@ func CreateTemplate(ctx context.Context, dir string, cfg Config, setup func(ctx 
 		if err != nil {
 			return err
 		}
-		if err := setup(ctx, pg); err != nil {
-			return errors.Join(fmt.Errorf("pglite: template setup: %w", err), pg.Close())
+		if setup != nil {
+			if err := setup(ctx, pg); err != nil {
+				return errors.Join(fmt.Errorf("pglite: template setup: %w", err), pg.Close())
+			}
 		}
 		return pg.Close()
 	}()
@@ -58,7 +61,7 @@ func removeAllExcept(root, keep string) error {
 	if err != nil {
 		return err
 	}
-	first, rest, _ := cutPath(keep)
+	first, rest, _ := strings.Cut(keep, string(filepath.Separator))
 	for _, e := range entries {
 		p := filepath.Join(root, e.Name())
 		switch {
@@ -73,15 +76,6 @@ func removeAllExcept(root, keep string) error {
 		}
 	}
 	return nil
-}
-
-func cutPath(p string) (first, rest string, ok bool) {
-	for i := 0; i < len(p); i++ {
-		if os.IsPathSeparator(p[i]) {
-			return p[:i], p[i+1:], true
-		}
-	}
-	return p, "", false
 }
 
 // cloneTemplate copies the cluster of the template directory into the

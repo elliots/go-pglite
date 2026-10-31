@@ -82,6 +82,16 @@ func (s *server) acceptLoop() {
 			return
 		}
 		s.mu.Lock()
+		select {
+		case <-s.done:
+			// close has already closed the connections it knew of; this
+			// one was accepted after that and would otherwise wait for
+			// its startup packet until the deadline.
+			s.mu.Unlock()
+			conn.Close()
+			return
+		default:
+		}
 		s.conns[conn] = struct{}{}
 		s.mu.Unlock()
 		s.wg.Go(func() {
@@ -235,8 +245,7 @@ func (c *session) run(params [][2]string) {
 	b := c.server.backend
 	defer c.end()
 	if err := c.start(params); err != nil {
-		var pgErr *PgError
-		if errors.As(err, &pgErr) {
+		if pgErr, ok := errors.AsType[*PgError](err); ok {
 			fatal(c.conn, pgErr.Code, pgErr.Message)
 		} else {
 			fatal(c.conn, codeInternalError, err.Error())

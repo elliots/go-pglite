@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -202,9 +201,7 @@ func TestPgxBatchErrorInTheMiddle(t *testing.T) {
 	if _, err := br.Exec(); err != nil {
 		t.Errorf("first insert: %v", err)
 	}
-	_, err := br.Exec()
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+	if _, err := br.Exec(); pgErrCode(err) != "23505" {
 		t.Errorf("second insert: %v, want unique_violation", err)
 	}
 	if _, err := br.Exec(); err == nil {
@@ -244,8 +241,7 @@ func TestPgxPipelineWithManyErrorsSurvives(t *testing.T) {
 	for range units {
 		if _, err := p.GetResults(); err != nil {
 			// The error for the unit comes with the first GetResults.
-			var pgErr *pgconn.PgError
-			if !errors.As(err, &pgErr) || pgErr.Code != "22012" {
+			if pgErrCode(err) != "22012" {
 				t.Fatalf("unit error: %v", err)
 			}
 			errs++
@@ -294,8 +290,7 @@ func TestPgxStatementCacheAfterDDL(t *testing.T) {
 	if err == nil {
 		_, err = pgx.CollectRows(rows, pgx.RowToMap)
 	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "0A000" {
+	if pgErrCode(err) != "0A000" {
 		t.Fatalf("after DDL: %v, want 0A000 cached plan must not change result type", err)
 	}
 	rows, err = conn.Query(ctx, "SELECT * FROM c WHERE id = $1", 1)
@@ -317,7 +312,7 @@ func TestPgxStatementCacheAfterDDL(t *testing.T) {
 	if err == nil {
 		_, err = pgx.CollectRows(rows, pgx.RowToMap)
 	}
-	if !errors.As(err, &pgErr) || pgErr.Code != "0A000" {
+	if pgErrCode(err) != "0A000" {
 		t.Fatalf("named after DDL: %v, want 0A000", err)
 	}
 	if err := conn.Deallocate(ctx, "allc"); err != nil {
@@ -358,8 +353,7 @@ func TestPgxCopyFromAndCopyTo(t *testing.T) {
 	// A failing COPY: the CopyData after the error is ignored and the
 	// session goes on.
 	_, err = conn.CopyFrom(ctx, pgx.Identifier{"missing"}, []string{"id"}, pgx.CopyFromRows([][]any{{int32(1)}}))
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+	if pgErrCode(err) != "42P01" {
 		t.Errorf("COPY into missing table: %v, want undefined_table", err)
 	}
 	var count int

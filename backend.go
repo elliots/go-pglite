@@ -214,8 +214,8 @@ func (b *backend) call(name string, f *wasmtime.Func, args ...any) (int32, error
 
 // exitStatus returns the WASI exit status carried by err, if any.
 func exitStatus(err error) (int32, bool) {
-	var werr *wasmtime.Error
-	if !errors.As(err, &werr) {
+	werr, ok := errors.AsType[*wasmtime.Error](err)
+	if !ok {
 		return 0, false
 	}
 	return werr.ExitStatus()
@@ -306,11 +306,15 @@ func (b *backend) run(input []byte) ([]byte, error) {
 	if err := b.interact(); err != nil {
 		return nil, err
 	}
-	n, err := b.interactiveRead.Call(b.store)
+	v, err := b.interactiveRead.Call(b.store)
 	if err != nil {
 		return nil, fmt.Errorf("interactive_read: %w", err)
 	}
-	if n := int(n.(int32)); n > 0 {
+	n, ok := v.(int32)
+	if !ok {
+		return nil, fmt.Errorf("interactive_read returned %T, want int32", v)
+	}
+	if n := int(n); n > 0 {
 		start := b.bufAddr + len(input) + 1
 		mem := b.memory.UnsafeData(b.store) // the call may have grown memory
 		if start+n > b.bufAddr+b.bufSize || start+n > len(mem) {

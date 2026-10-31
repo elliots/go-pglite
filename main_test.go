@@ -20,7 +20,7 @@ func TestMain(m *testing.M) {
 	}
 	TestTemplate = filepath.Join(dir, "template")
 	start := time.Now()
-	err = CreateTemplate(context.Background(), TestTemplate, Config{}, func(context.Context, *PGlite) error { return nil })
+	err = CreateTemplate(context.Background(), TestTemplate, Config{}, nil)
 	if err != nil {
 		panic(err)
 	}
