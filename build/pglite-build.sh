@@ -155,8 +155,13 @@ $CC $CFLAGS $INCLUDES \
   -c "$PGSRC/wasm-build/sdk_port-wasi/sdk_port-wasi-dlfcn.c" -o "$BUILD/dlfcn.o"
 # libpgcore.a is a relocatable link of the whole backend and already carries
 # crt1's _start, hence -nostartfiles.
+#
+# wasm-ld places the shadow stack at the start of linear memory by default
+# (--stack-first), where it would share [0, CMA_MB MB) with the I/O zone:
+# a reply of a few MB then overwrites live stack frames. --no-stack-first
+# puts it after the static data, which --global-base starts at CMA_MB MB.
 $CC $CFLAGS -nostartfiles \
-  -Wl,--global-base=$((CMA_MB * 1024 * 1024)) -Wl,-z,stack-size=$STACK_SIZE \
+  -Wl,--global-base=$((CMA_MB * 1024 * 1024)) -Wl,-z,stack-size=$STACK_SIZE -Wl,--no-stack-first \
   -o "$BUILD/pglite.wasi" \
   "$BUILD/pglite.o" "$BUILD/dlfcn.o" \
   "$BUILD/libpgcore.a" \
@@ -188,7 +193,7 @@ rm -rf "$STAGE"
   clang --version | head -1
   echo "CFLAGS: $CFLAGS"
   echo "LDFLAGS: $LDFLAGS"
-  echo "link: --global-base=$((CMA_MB * 1024 * 1024)) -z stack-size=$STACK_SIZE"
+  echo "link: --global-base=$((CMA_MB * 1024 * 1024)) -z stack-size=$STACK_SIZE --no-stack-first"
 } > "$OUT/toolchain.txt"
 
 log "done: $OUT/$LABEL.tar.gz"
