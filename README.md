@@ -156,10 +156,10 @@ overwrote it) and the heap.
 
 ## Licences
 
-The embedded build is made of PostgreSQL, PGlite's port, wasi-libc and
-other components under their own licences; see
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This repository has no
-licence file of its own.
+go-pglite is licensed under the MIT License; see [LICENSE](LICENSE). The
+embedded build is made of PostgreSQL, PGlite's port, wasi-libc and other
+components under their own licences; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Requirements
 

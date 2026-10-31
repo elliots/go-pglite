@@ -20,4 +20,4 @@ cache: [wasmtime-go](https://github.com/bytecodealliance/wasmtime-go)
 (Apache-2.0 with LLVM exceptions, bundling wasmtime, Apache-2.0 with LLVM
 exceptions) and [pgx](https://github.com/jackc/pgx) (MIT).
 
-This repository itself has no licence file; its owner has not chosen one.
+go-pglite's own code is licensed under the MIT License (see LICENSE).
