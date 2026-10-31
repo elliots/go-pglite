@@ -23,8 +23,8 @@ type Config struct {
 	// yet.
 	Template string
 
-	// CacheDir holds what every instance shares: the extracted installation
-	// and wasmtime's compiled code. Empty means DefaultCacheDir.
+	// CacheDir holds the extracted installation every instance shares.
+	// Empty means DefaultCacheDir.
 	CacheDir string
 
 	// Settings are session settings every connection starts with, applied

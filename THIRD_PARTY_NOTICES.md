@@ -16,8 +16,11 @@ The patches in `build/patches/` and the shims in `build/compat/` are part of
 this repository.
 
 Go dependencies of the package, with their own licences in the module
-cache: [wasmtime-go](https://github.com/bytecodealliance/wasmtime-go)
-(Apache-2.0 with LLVM exceptions, bundling wasmtime, Apache-2.0 with LLVM
-exceptions) and [pgx](https://github.com/jackc/pgx) (MIT).
+cache: [wago](https://github.com/wago-org/wago) (Apache-2.0, with a NOTICE
+file; `go.mod` replaces it with the fork
+[elliots/wago](https://github.com/elliots/wago), same licence),
+[wago-org/wasi](https://github.com/wago-org/wasi) (Apache-2.0, with a NOTICE
+file), [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) (BSD
+3-Clause) and [pgx](https://github.com/jackc/pgx) (MIT).
 
 go-pglite's own code is licensed under the MIT License (see LICENSE).

@@ -15,24 +15,21 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bytecodealliance/wasmtime-go/v50"
+	"github.com/wago-org/wago"
 )
 
-// maxWasmStack is the native stack wasmtime lets WebAssembly frames use.
-// PostgreSQL limits recursion by its shadow stack (max_stack_depth, see
-// check_stack_depth); the native frames of the same recursion must fit
-// here, or wasmtime traps before PostgreSQL reports the error. 2MB is
-// wasmtime's cap; the module's max_stack_depth of 256kB was measured
-// against it (see build/patches).
-const maxWasmStack = 2 << 20
+// nativeStackBytes is the native stack wago gives each instance. PostgreSQL
+// limits recursion by its shadow stack (max_stack_depth, see
+// check_stack_depth); the native frames of the same recursion must fit here,
+// or wago traps before PostgreSQL reports the error.
+const nativeStackBytes = 8 << 20
 
-// runtime is what every instance in the process shares: the wasmtime engine,
-// the compiled module and the extracted installation (binaries, share files
-// and library placeholders). There is one per cache directory.
+// runtime is what every instance in the process shares: the compiled module
+// and the extracted installation (binaries, share files and library
+// placeholders). There is one per cache directory.
 type runtime struct {
-	engine  *wasmtime.Engine
-	module  *wasmtime.Module
-	install string // directory holding pglite/{bin,share,lib}
+	compiled *wago.Compiled
+	install  string // directory holding pglite/{bin,share,lib}
 }
 
 var runtimes struct {
@@ -68,32 +65,18 @@ func newRuntime(cacheDir string) (*runtime, error) {
 		return nil, err
 	}
 
-	// The module implements setjmp/longjmp with WebAssembly exception
-	// handling (exnref encoding), which wasmtime runs only when the proposal
-	// is enabled. Compiled code is cached by wasmtime itself, keyed by the
-	// module's hash and the configuration, so later processes start without
-	// compiling.
-	cfg := wasmtime.NewConfig()
-	cfg.SetWasmExceptions(true)
-	cfg.SetMaxWasmStack(maxWasmStack)
-	cacheConfig := filepath.Join(cacheDir, "wasmtime-cache.toml")
-	if err := writeFileIfChanged(cacheConfig, []byte(fmt.Sprintf("[cache]\ndirectory = %q\n", filepath.Join(cacheDir, "wasmtime")))); err != nil {
-		return nil, fmt.Errorf("pglite: compile cache: %w", err)
-	}
-	if err := cfg.CacheConfigLoad(cacheConfig); err != nil {
-		return nil, fmt.Errorf("pglite: compile cache %s: %w", cacheConfig, err)
-	}
-	engine := wasmtime.NewEngineWithConfig(cfg)
-
 	wasm, err := os.ReadFile(filepath.Join(install, "pglite", "bin", "pglite.wasi"))
 	if err != nil {
 		return nil, fmt.Errorf("pglite: %w", err)
 	}
-	module, err := wasmtime.NewModule(engine, wasm)
+	// The module implements setjmp/longjmp with WebAssembly exception
+	// handling (exnref encoding). Compiling takes about half a second, so
+	// nothing is cached between processes.
+	compiled, err := wago.CompileWithConfig(wago.NewRuntimeConfig().WithNativeStackBytes(nativeStackBytes), wasm)
 	if err != nil {
 		return nil, fmt.Errorf("pglite: compiling module: %w", err)
 	}
-	return &runtime{engine: engine, module: module, install: install}, nil
+	return &runtime{compiled: compiled, install: install}, nil
 }
 
 // installArchive extracts the embedded archive into dir unless it is already
@@ -178,14 +161,6 @@ func extractTarGz(destDir string, data []byte) error {
 			return fmt.Errorf("archive entry %q has unsupported type %q", hdr.Name, hdr.Typeflag)
 		}
 	}
-}
-
-// writeFileIfChanged writes data to path unless the file already holds it.
-func writeFileIfChanged(path string, data []byte) error {
-	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
-		return nil
-	}
-	return os.WriteFile(path, data, 0o644)
 }
 
 // DefaultCacheDir returns the directory New uses for Config.CacheDir when it

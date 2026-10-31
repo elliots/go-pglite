@@ -63,9 +63,8 @@ export RANLIB=llvm-ranlib
 # Time zone data is compiled with the host's zic.
 export ZIC=/usr/sbin/zic
 
-# setjmp/longjmp through WebAssembly exception handling, in the exnref
-# encoding (try_table) that wasmtime implements. The legacy encoding is
-# LLVM's default and wasmtime rejects it.
+# setjmp/longjmp through WebAssembly exception handling, in the standard
+# exnref encoding (try_table) rather than LLVM's default legacy encoding.
 SJLJ="-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false"
 EMULATED="-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
 EMULATED_LIBS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid -lwasi-emulated-mman"

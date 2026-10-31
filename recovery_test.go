@@ -136,7 +136,7 @@ func TestLongQueryCrossesBridge(t *testing.T) {
 }
 
 // SQL-function recursion uses little shadow stack per level and so is the
-// case most likely to exhaust wasmtime's native stack before PostgreSQL's
+// case most likely to exhaust the native stack before PostgreSQL's
 // check fires; the module's max_stack_depth default keeps it ahead.
 func TestSQLFunctionRecursionReportsStackDepth(t *testing.T) {
 	db := openPgx(t, newTestPG(t))

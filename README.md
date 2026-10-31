@@ -1,9 +1,10 @@
 # go-pglite
 
 PostgreSQL 17.5 in a Go process: [PGlite](https://pglite.dev/)'s WASI port
-of PostgreSQL, run with [wasmtime-go](https://github.com/bytecodealliance/wasmtime-go),
-behind a Unix socket that pgx or any other PostgreSQL client in the process
-connects to. No external server, no Docker; cgo is required.
+of PostgreSQL, run with [wago](https://github.com/wago-org/wago), behind a
+Unix socket that pgx or any other PostgreSQL client in the process connects
+to. No external server, no Docker, no cgo: it is pure Go and builds with
+`CGO_ENABLED=0`.
 
 ## Usage
 
@@ -44,7 +45,7 @@ an Apple M-series laptop; `go test -v -run TestLatencyReport` and
 pglite.Config{
     DataDir:    "",            // instance directory; empty = temporary, removed on Close
     Template:   "",            // template to copy the cluster from (CreateTemplate)
-    CacheDir:   "",            // shared installation and compiled code; empty = user cache dir
+    CacheDir:   "",            // shared extracted installation; empty = user cache dir
     Settings:   map[string]string{"synchronous_commit": "off"}, // session settings every connection starts with
     StdoutFile: "",            // the module's stdout; empty = discarded
     StderrFile: "",            // PostgreSQL's log; empty = discarded
@@ -102,19 +103,19 @@ commits after a crash.
   inside the module.
 - Recursion is limited by `max_stack_depth=256kB`, set in the module (see
   `build/patches/`); deeper recursion reports PostgreSQL's "stack depth
-  limit exceeded" before wasmtime's native stack runs out. Do not raise it.
+  limit exceeded" before the native stack runs out. Do not raise it.
 - An instance holds the cluster's files open; copy a template only when no
   instance runs on it.
 
 ## How it works
 
 `pglite-wasi-17.5.tar.gz` is embedded with `//go:embed`. On first use in a
-process it is extracted into `CacheDir`, where wasmtime also caches the
-compiled code (compiling the 11MB module takes a few seconds; later
-processes skip it). Each instance is one wasmtime store with the module
-instantiated against WASI preview 1: the instance directory is `/tmp`, the
-shared installation is `/tmp/pglite` read-only, the cluster is
-`/tmp/pglite/base`, and the host's `/dev` provides `/dev/urandom`.
+process it is extracted into `CacheDir`, and wago compiles the 11MB module
+once per process, in about half a second; no compiled code is kept on disk.
+Each instance is one wago instance of the module, with WASI preview 1 from
+[wago-org/wasi](https://github.com/wago-org/wasi): the instance directory
+is `/tmp`, the shared installation is `/tmp/pglite` read-only, the cluster
+is `/tmp/pglite/base`, and the host's `/dev` provides `/dev/urandom`.
 
 Start-up calls the module's `_start`, `pgl_initdb` and `pgl_backend`. A
 freshly initialised cluster is shut down and started again, because initdb
@@ -131,8 +132,32 @@ back from the same buffer. Input over 6MB and replies over 12MB go through
 files in the cluster directory instead. There is no polling.
 
 Errors raised by PostgreSQL unwind with setjmp/longjmp, which the build
-implements with the WebAssembly exception-handling proposal (wasmtime runs
-it with `SetWasmExceptions(true)`).
+implements with the WebAssembly exception-handling proposal in its exnref
+encoding (`try_table`).
+
+## The wago replace
+
+`go.mod` replaces `github.com/wago-org/wago` with a commit of
+[elliots/wago](https://github.com/elliots/wago) that carries two
+code-generation fixes from
+[wago-org/wago#1043](https://github.com/wago-org/wago/pull/1043), which no
+wago release includes yet. A module that depends on go-pglite needs the
+same line in its own `go.mod`, because Go applies only the main module's
+replace directives:
+
+```
+replace github.com/wago-org/wago => github.com/elliots/wago v0.1.0-beta.13.0.20261031190326-525587b6fa86
+```
+
+The fixes:
+
+- Leaving a `try_table` with `return` from inside its body ends its
+  handler. The module's setjmp functions return from inside their
+  `try_table` (every `PG_TRY` that completes normally); without the fix
+  the next PostgreSQL error that unwinds past such a frame hangs or
+  crashes the process, and initdb hits it.
+- On arm64, `local.tee` of a comparison fused with the following `br_if`
+  keeps its value after calls.
 
 ## Building the WASI binary
 
@@ -163,7 +188,7 @@ components under their own licences; see
 
 ## Requirements
 
-- Go 1.27+, cgo
+- Go 1.27+
 - macOS or Linux
 
 ## Running tests

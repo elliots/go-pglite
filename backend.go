@@ -3,17 +3,20 @@ package pglite
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
-	"github.com/bytecodealliance/wasmtime-go/v50"
+	"github.com/wago-org/wago"
+	"github.com/wago-org/wasi/p1"
 )
 
-// backend is one PostgreSQL single-user backend running in a wasmtime
-// instance. It executes frontend messages and returns the backend's reply.
+// backend is one PostgreSQL single-user backend running in an instance of
+// the module. It executes frontend messages and returns the backend's reply.
 // Its methods are not safe for concurrent use; the server serialises them.
 //
 // How the module talks: interactive_one() processes the pending input,
@@ -27,13 +30,8 @@ import (
 // module (ereport longjmps to the handler around the message loop); a
 // trap is a crash.
 type backend struct {
-	store  *wasmtime.Store
-	memory *wasmtime.Memory
-
-	interactiveOne   *wasmtime.Func
-	interactiveWrite *wasmtime.Func
-	interactiveRead  *wasmtime.Func
-	shutdownFn       *wasmtime.Func
+	inst    *wago.Instance
+	outputs []*os.File // files receiving the module's stdout and stderr
 
 	bufAddr int // start of the shared buffer in linear memory
 	bufSize int // size of the shared buffer
@@ -84,12 +82,17 @@ func startBackend(rt *runtime, dir string, cfg *Config) (_ *backend, fresh bool,
 		}
 	}()
 
-	wasi := wasmtime.NewWasiConfig()
-	wasi.SetArgv([]string{"/tmp/pglite/bin/postgres", "--single", Database})
-	wasi.SetEnv(
-		[]string{"ENVIRONMENT", "PREFIX", "PGDATA", "PGSYSCONFDIR", "PGUSER", "PGDATABASE", "MODE", "REPL", "TZ", "PGTZ", "PATH"},
-		[]string{"wasm32_wasi_preview1", "/tmp/pglite", "/tmp/pglite/base", "/tmp/pglite", User, Database, "REACT", "N", "UTC", "UTC", "/tmp/pglite/bin"},
-	)
+	wasi := p1.Config{
+		Args: []string{"/tmp/pglite/bin/postgres", "--single", Database},
+		Env: []string{
+			"ENVIRONMENT=wasm32_wasi_preview1", "PREFIX=/tmp/pglite",
+			"PGDATA=/tmp/pglite/base", "PGSYSCONFDIR=/tmp/pglite",
+			"PGUSER=" + User, "PGDATABASE=" + Database, "MODE=REACT",
+			"REPL=N", "TZ=UTC", "PGTZ=UTC", "PATH=/tmp/pglite/bin",
+		},
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	}
 	// The module expects its installation under /tmp/pglite with the data
 	// directory at /tmp/pglite/base. wasi-libc resolves a path against the
 	// preopen with the longest matching prefix, so the installation is
@@ -109,58 +112,56 @@ func startBackend(rt *runtime, dir string, cfg *Config) (_ *backend, fresh bool,
 		{"/dev", "/dev", false},
 	}
 	for _, p := range preopens {
-		if err := wasi.PreopenDir(p.host, p.guest, p.writable); err != nil {
+		// WASI skips a directory it cannot open instead of failing, so
+		// each one is checked here.
+		st, err := os.Stat(p.host)
+		if err == nil && !st.IsDir() {
+			err = errors.New("not a directory")
+		}
+		if err != nil {
 			return nil, false, fmt.Errorf("pglite: map %s to %s: %w", p.host, p.guest, err)
 		}
+		wasi.Mounts = append(wasi.Mounts, p1.Preopen{
+			GuestPath: p.guest, HostPath: p.host,
+			Read: true, Write: p.writable, MutateDirectory: p.writable,
+		})
 	}
-	// Without a file, the module's output is discarded inside wasmtime.
 	if cfg.StdoutFile != "" {
-		if err := wasi.SetStdoutFile(cfg.StdoutFile); err != nil {
+		if wasi.Stdout, err = b.createOutput(cfg.StdoutFile); err != nil {
 			return nil, false, fmt.Errorf("pglite: stdout file: %w", err)
 		}
 	}
 	if cfg.StderrFile != "" {
-		if err := wasi.SetStderrFile(cfg.StderrFile); err != nil {
+		if wasi.Stderr, err = b.createOutput(cfg.StderrFile); err != nil {
 			return nil, false, fmt.Errorf("pglite: stderr file: %w", err)
 		}
 	}
 
-	b.store = wasmtime.NewStore(rt.engine)
-	b.store.SetWasi(wasi)
-	linker := wasmtime.NewLinker(rt.engine)
-	if err := linker.DefineWasi(); err != nil {
-		return nil, false, fmt.Errorf("pglite: define WASI imports: %w", err)
-	}
-	instance, err := linker.Instantiate(b.store, rt.module)
-	if err != nil {
-		return nil, false, fmt.Errorf("pglite: instantiate module: %w", err)
-	}
-	exports := map[string]**wasmtime.Func{
-		"interactive_one":   &b.interactiveOne,
-		"interactive_write": &b.interactiveWrite,
-		"interactive_read":  &b.interactiveRead,
-		"pgl_shutdown":      &b.shutdownFn,
-	}
-	for name, f := range exports {
-		if *f = instance.GetFunc(b.store, name); *f == nil {
+	exports := rt.compiled.ExportedFunctions()
+	for _, name := range []string{
+		"_start", "pgl_initdb", "pgl_backend", "get_buffer_addr", "get_buffer_size", "use_wire",
+		"interactive_one", "interactive_write", "interactive_read", "pgl_shutdown",
+	} {
+		if !slices.Contains(exports, name) {
 			return nil, false, fmt.Errorf("pglite: module has no %s export", name)
 		}
 	}
-	memory := instance.GetExport(b.store, "memory")
-	if memory == nil || memory.Memory() == nil {
+	if b.inst, err = wago.Instantiate(rt.compiled, wago.InstantiateOptions{Imports: p1.Imports(wasi)}); err != nil {
+		return nil, false, fmt.Errorf("pglite: instantiate module: %w", err)
+	}
+	if b.inst.Memory() == nil {
 		return nil, false, errors.New("pglite: module does not export its memory")
 	}
-	b.memory = memory.Memory()
 
 	// _start runs main(), which sets up the C runtime and exits with status
 	// 0 without starting PostgreSQL; pgl_initdb creates the cluster if
 	// PGDATA has none; pgl_backend starts the single-user backend.
-	if _, err := b.call("_start", instance.GetFunc(b.store, "_start")); err != nil {
+	if _, err := b.call("_start"); err != nil {
 		if status, ok := exitStatus(err); !ok || status != 0 {
 			return nil, false, err
 		}
 	}
-	status, err := b.call("pgl_initdb", instance.GetFunc(b.store, "pgl_initdb"))
+	status, err := b.call("pgl_initdb")
 	if err != nil {
 		return nil, false, err
 	}
@@ -168,57 +169,83 @@ func startBackend(rt *runtime, dir string, cfg *Config) (_ *backend, fresh bool,
 		return nil, false, fmt.Errorf("pglite: initdb failed (status %#x)%s", status, b.stderrHint())
 	}
 	fresh = status&idbHasDB == 0
-	if _, err := b.call("pgl_backend", instance.GetFunc(b.store, "pgl_backend")); err != nil {
+	if _, err := b.call("pgl_backend"); err != nil {
 		return nil, false, err
 	}
 
-	addr, err := b.call("get_buffer_addr", instance.GetFunc(b.store, "get_buffer_addr"), int32(0))
+	addr, err := b.call("get_buffer_addr", int32(0))
 	if err != nil {
 		return nil, false, err
 	}
-	size, err := b.call("get_buffer_size", instance.GetFunc(b.store, "get_buffer_size"), int32(0))
+	size, err := b.call("get_buffer_size", int32(0))
 	if err != nil {
 		return nil, false, err
 	}
-	if addr <= 0 || size <= 0 || int(addr)+int(size) > len(b.memory.UnsafeData(b.store)) {
+	if addr <= 0 || size <= 0 || int(addr)+int(size) > len(b.memory()) {
 		return nil, false, fmt.Errorf("pglite: module reports an invalid shared buffer (address %d, size %d)", addr, size)
 	}
 	b.bufAddr, b.bufSize = int(addr), int(size)
 
 	// Wire mode: input and output are protocol messages rather than SQL
 	// text and console output.
-	if _, err := b.call("use_wire", instance.GetFunc(b.store, "use_wire"), int32(1)); err != nil {
+	if _, err := b.call("use_wire", int32(1)); err != nil {
 		return nil, false, err
 	}
 	return b, fresh, nil
 }
 
-// call calls an exported function that returns nothing or an i32.
-func (b *backend) call(name string, f *wasmtime.Func, args ...any) (int32, error) {
-	if f == nil {
-		return 0, fmt.Errorf("pglite: module has no %s export", name)
+// createOutput opens a file for the module's output, replacing its
+// contents. close closes it.
+func (b *backend) createOutput(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
 	}
-	v, err := f.Call(b.store, args...)
+	b.outputs = append(b.outputs, f)
+	return f, nil
+}
+
+// invoke calls an exported function that takes i32 arguments and returns
+// nothing (reported as 0) or one i32.
+func (b *backend) invoke(name string, args ...int32) (int32, error) {
+	raw := make([]uint64, len(args))
+	for i, a := range args {
+		raw[i] = wago.I32(a)
+	}
+	r, err := b.inst.Invoke(name, raw...)
+	if err != nil {
+		return 0, err
+	}
+	switch len(r) {
+	case 0:
+		return 0, nil
+	case 1:
+		return wago.AsI32(r[0]), nil
+	default:
+		return 0, fmt.Errorf("%s returned %d values, want at most one", name, len(r))
+	}
+}
+
+// call is invoke for the start-up calls, with errors that name the call.
+func (b *backend) call(name string, args ...int32) (int32, error) {
+	v, err := b.invoke(name, args...)
 	if err != nil {
 		return 0, fmt.Errorf("pglite: %s: %w%s", name, err, b.stderrHint())
 	}
-	if v == nil {
-		return 0, nil
-	}
-	i, ok := v.(int32)
-	if !ok {
-		return 0, fmt.Errorf("pglite: %s returned %T, want int32", name, v)
-	}
-	return i, nil
+	return v, nil
 }
+
+// memory returns the current view of linear memory. A call into the module
+// may grow memory and invalidate the view.
+func (b *backend) memory() []byte { return b.inst.Memory().UnsafeBytes() }
 
 // exitStatus returns the WASI exit status carried by err, if any.
 func exitStatus(err error) (int32, bool) {
-	werr, ok := errors.AsType[*wasmtime.Error](err)
+	exit, ok := errors.AsType[*wago.ExitError](err)
 	if !ok {
 		return 0, false
 	}
-	return werr.ExitStatus()
+	return exit.Code, true
 }
 
 func (b *backend) stderrHint() string {
@@ -298,25 +325,20 @@ func (b *backend) run(input []byte) ([]byte, error) {
 		}
 		return b.runFile()
 	}
-	mem := b.memory.UnsafeData(b.store)
-	copy(mem[b.bufAddr:], input)
-	if _, err := b.interactiveWrite.Call(b.store, int32(len(input))); err != nil {
+	copy(b.memory()[b.bufAddr:], input)
+	if _, err := b.invoke("interactive_write", int32(len(input))); err != nil {
 		return nil, fmt.Errorf("interactive_write: %w", err)
 	}
 	if err := b.interact(); err != nil {
 		return nil, err
 	}
-	v, err := b.interactiveRead.Call(b.store)
+	n, err := b.invoke("interactive_read")
 	if err != nil {
 		return nil, fmt.Errorf("interactive_read: %w", err)
 	}
-	n, ok := v.(int32)
-	if !ok {
-		return nil, fmt.Errorf("interactive_read returned %T, want int32", v)
-	}
 	if n := int(n); n > 0 {
 		start := b.bufAddr + len(input) + 1
-		mem := b.memory.UnsafeData(b.store) // the call may have grown memory
+		mem := b.memory() // the call may have grown memory
 		if start+n > b.bufAddr+b.bufSize || start+n > len(mem) {
 			return nil, fmt.Errorf("reply of %d bytes at %d overruns the shared buffer", n, start)
 		}
@@ -336,7 +358,7 @@ func (b *backend) inputFile() (*os.File, error) {
 // receive buffer, and returns the reply from the output file.
 func (b *backend) runFile() ([]byte, error) {
 	// A zero length selects file input.
-	if _, err := b.interactiveWrite.Call(b.store, int32(0)); err != nil {
+	if _, err := b.invoke("interactive_write", 0); err != nil {
 		return nil, fmt.Errorf("interactive_write: %w", err)
 	}
 	if err := os.Rename(b.lockInFile, b.inFile); err != nil {
@@ -352,7 +374,7 @@ func (b *backend) runFile() ([]byte, error) {
 // on entry, so the call must come from the host, never from inside an
 // import callback. A trap means the module crashed.
 func (b *backend) interact() error {
-	if _, err := b.interactiveOne.Call(b.store); err != nil {
+	if _, err := b.invoke("interactive_one"); err != nil {
 		return fmt.Errorf("interactive_one trapped: %w", err)
 	}
 	return nil
@@ -425,7 +447,7 @@ func (b *backend) shutdown() error {
 		if _, err = b.query("CHECKPOINT"); err == nil {
 			// pgl_shutdown runs proc_exit(66), which this build turns
 			// into a partial shutdown that returns.
-			if _, callErr := b.shutdownFn.Call(b.store); callErr != nil {
+			if _, callErr := b.invoke("pgl_shutdown"); callErr != nil {
 				if status, ok := exitStatus(callErr); !ok || status != 66 {
 					err = fmt.Errorf("pglite: pgl_shutdown: %w%s", callErr, b.stderrHint())
 				}
@@ -441,8 +463,12 @@ func (b *backend) close() error {
 		return nil
 	}
 	b.closed = true
-	if b.store != nil {
-		b.store.Close()
+	var err error
+	if b.inst != nil {
+		err = b.inst.Close()
 	}
-	return nil
+	for _, f := range b.outputs {
+		err = errors.Join(err, f.Close())
+	}
+	return err
 }

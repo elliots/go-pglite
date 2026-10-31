@@ -1,5 +1,5 @@
 // Package pglite runs PostgreSQL 17.5 in-process: PGlite's WASI build of
-// PostgreSQL, executed with wasmtime, behind a Unix socket that any
+// PostgreSQL, executed with wago in pure Go, behind a Unix socket that any
 // PostgreSQL client in the process can connect to.
 //
 // Each instance is one PostgreSQL single-user backend, so it serves one
