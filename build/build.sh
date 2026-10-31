@@ -91,7 +91,7 @@ log "provenance"
   echo "Build command"
   echo "  build/build.sh  (runs build/pglite-build.sh in the image)"
   echo
-  echo "Archive layout (tmp/ prefix is stripped on extraction, see setup.go)"
+  echo "Archive layout (tmp/ prefix is stripped on extraction, see extractTarGz in runtime.go)"
   echo "  tmp/pglite/bin/pglite.wasi      the module; initdb and postgres are symlinks to it"
   echo "  tmp/pglite/share/postgresql     share files including timezone data"
   echo "  tmp/pglite/lib/postgresql       empty .so placeholders; plpgsql and dict_snowball are linked in"

@@ -9,7 +9,7 @@ RUN apt-get update \
       ca-certificates curl xz-utils make perl bison flex python3 file \
  && rm -rf /var/lib/apt/lists/*
 
-# wasi-sdk 34.0 (LLVM 22, wasi-libc with libsetjmp), released 2026-08-25.
+# wasi-sdk 34.0 (LLVM 23.1.0, wasi-libc 2e6fb9d8ee0c with libsetjmp), released 2026-08-25.
 # Checksums are the ones GitHub records for the release assets.
 ARG TARGETARCH
 RUN set -eu; \
